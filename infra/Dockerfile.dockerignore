@@ -4,6 +4,7 @@
 !crucible/worker.py
 !crucible/safe_commands.py
 !crucible/network_policy.py
+!crucible/secret_scan.py
 !infra/
 !infra/extract-scenario.py
 !infra/wall-probe.py
