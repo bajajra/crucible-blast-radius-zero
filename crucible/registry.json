@@ -1,0 +1,7 @@
+{
+  "plugins": [
+    {"id": "d1_egress_allowlist_v1", "dimension": "D1", "triggers": ["egress", "exfil", "dependency_fetch", "lookalike"], "type": "pull"},
+    {"id": "d3_semantic_classifier_v1", "dimension": "D3", "triggers": ["dependency_fetch", "lookalike", "ambiguous_egress", "injection", "exfil"], "type": "pull"},
+    {"id": "d6_output_filter_v1", "dimension": "D6", "triggers": ["secret_exfil", "output", "egress", "shared_channel"], "type": "pull"}
+  ]
+}

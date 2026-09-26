@@ -1,0 +1,47 @@
+# Apply with: dsh --profile headless --patch /opt/crucible/dsh/worker.patch.yml ...
+# This patch is for the disposable worker container. The supervisor owns the
+# policy gateway and scans all container output before displaying or storing it.
+
+- id: llm-deepseek
+  disabled: true
+
+- id: session-log-deepseek
+  disabled: true
+
+- id: session-telemetry-otel
+  disabled: true
+
+- id: web-search-deepseek
+  disabled: true
+
+- id: tool-web
+  disabled: true
+
+- id: tool-plugin-manager
+  disabled: true
+
+- id: agent-instructions
+  disabled: true
+
+- id: llm-pi-ai
+  config:
+    providers:
+      vultr:
+        displayName: Vultr via CRUCIBLE gateway
+        apiKeyEnv: CRUCIBLE_INFERENCE_TOKEN
+        api: openai-completions
+        baseURL: !!js process.env.CRUCIBLE_INFERENCE_BASE_URL
+        models:
+          - id: !!js process.env.CRUCIBLE_WORKER_MODEL ?? 'glm-5.3-flash'
+
+- id: agent-default-model
+  config:
+    provider: vultr
+    model: !!js process.env.CRUCIBLE_WORKER_MODEL ?? 'glm-5.3-flash'
+
+- insert:
+    - id: crucible-policy-gate
+      name: './policy_plugin.mjs'
+      config:
+        brokerUrl: !!js process.env.CRUCIBLE_BROKER_URL
+        timeoutMs: 3000

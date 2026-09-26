@@ -1,0 +1,9 @@
+**
+!crucible/
+!crucible/__init__.py
+!crucible/worker.py
+!crucible/safe_commands.py
+!crucible/network_policy.py
+!infra/
+!infra/extract-scenario.py
+!infra/wall-probe.py

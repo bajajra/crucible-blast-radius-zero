@@ -1,0 +1,13 @@
+# Keyless test overlay. The repository's own mock LLM asks to run `bash` once.
+# CRUCIBLE_DSH_SMOKE_DENY_ALL=1 makes the hook deny it before shell dispatch.
+- id: llm-pi-ai
+  disabled: true
+
+- id: agent-default-model
+  config:
+    provider: cli-mock
+    model: cli-mock
+
+- insert:
+    - id: cli-mock-llm
+      name: '../../deepseek-harness/packages/test-support/loader-smoke/tests/fixtures/cli-mock-llm.ts'
