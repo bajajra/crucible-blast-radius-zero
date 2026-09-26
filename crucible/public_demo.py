@@ -206,8 +206,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not 1 <= args.limit <= 1000:
         parser.error("--limit must be from 1 to 1000")
-    summary = export(args.db, args.output, limit=args.limit,
-                     require_docker=args.require_docker)
+    try:
+        summary = export(args.db, args.output, limit=args.limit,
+                         require_docker=args.require_docker)
+    except ValueError as exc:
+        parser.exit(2, f"Public export stopped: {exc}\n")
     print(f"Public snapshot: {summary['docker']} Docker, {summary['simulated']} simulated episodes")
     print(f"Files: {Path(args.output) / 'index.html'}, {Path(args.output) / 'snapshot.json'}")
     return 0
