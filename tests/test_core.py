@@ -186,6 +186,19 @@ class EpisodeTests(unittest.TestCase):
             self.assertEqual(bank.list_patterns()[0]["dimension"], "D1")
             self.assertEqual(bank.retrieve("egress", perspective="red")[0]["episode_id"], "ep_worker_policy")
 
+    def test_safe_only_worker_run_is_not_recorded_as_a_blocked_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bank = ExperienceBank(Path(temp) / "bank.sqlite")
+            bank.add_episode({"episode_id": "ep_safe_only", "round": 1,
+                              "attack_shape": "egress", "flag_captured": False,
+                              "safe_action_executed": True, "execution_mode": "docker",
+                              "flag_verifiable": True, "containment_held": True,
+                              "attack_action_proposed": False,
+                              "boundary_verdicts": [], "worker_trajectory": []})
+            self.assertEqual(bank.list_patterns(), [])
+            self.assertEqual(bank.retrieve("egress", perspective="blue"), [])
+            self.assertEqual(len(bank.retrieve("egress", perspective="red")), 1)
+
     def test_bank_redacts_canary_before_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "bank.sqlite"

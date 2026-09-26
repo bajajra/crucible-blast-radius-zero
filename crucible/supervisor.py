@@ -366,6 +366,7 @@ class Supervisor:
             "episode_id": episode_id, "round": scenario.round, "scenario": scenario.public_record(),
             "attack_shape": scenario.attack_shape, "worker_mode": self.config.mode,
             "execution_mode": self.config.execution, "proposal_error": proposal_error,
+            "attack_action_proposed": is_attack_proposal,
             "retry_error": retry_error,
             "worker_trajectory": trajectory, "boundary_verdicts": [check for event in trajectory for check in event["checks"]],
             "flag_captured": flag_captured,

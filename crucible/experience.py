@@ -110,8 +110,11 @@ class ExperienceBank:
         with self._connect() as db:
             rows = db.execute("SELECT pattern_id, attack_shape, dimension, recommended_defense, supporting_episodes FROM patterns ORDER BY updated_at DESC").fetchall()
             episode_rows = db.execute("SELECT episode_id, record_json FROM episodes").fetchall()
-        verified_ids = {episode_id for episode_id, raw in episode_rows
-                        if _credible_docker_episode(json.loads(raw))}
+        verified_ids: set[str] = set()
+        for episode_id, raw in episode_rows:
+            entry = json.loads(raw)
+            if _credible_docker_episode(entry) and entry.get("attack_action_proposed") is not False:
+                verified_ids.add(episode_id)
         out: list[dict[str, Any]] = []
         for row in rows:
             supporting = json.loads(row[4])
@@ -129,7 +132,8 @@ class ExperienceBank:
         if not rows:
             return
         episodes = [json.loads(row[0]) for row in rows]
-        episodes = [entry for entry in episodes if _credible_docker_episode(entry)]
+        episodes = [entry for entry in episodes if _credible_docker_episode(entry) and
+                    entry.get("attack_action_proposed") is not False]
         if not episodes:
             return
         blocked = [entry for entry in episodes if entry.get("containment_held") and
@@ -161,7 +165,8 @@ class ExperienceBank:
             raise ValueError("perspective must be red or blue")
         entries = [entry for entry in self.list_episodes(limit=500) if _credible_docker_episode(entry)]
         candidates = (entries if perspective == "red" else
-                      [entry for entry in entries if entry.get("containment_held") and entry.get("safe_action_executed")])
+                      [entry for entry in entries if entry.get("attack_action_proposed") is not False and
+                       entry.get("containment_held") and entry.get("safe_action_executed")])
         query_terms = _tokens(query)
         candidates.sort(key=lambda entry: len(query_terms & _tokens(
             entry.get("attack_shape", "") + " " + entry.get("diagnosis", {}).get("analysis", "")
