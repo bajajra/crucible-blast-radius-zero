@@ -8,11 +8,9 @@ denies them there by default even when the broker approves. The
 `CRUCIBLE_DSH_CONTAINERIZED=1` flag is only a guard switch; setting it on the
 host does not create isolation. DSH tool calls are **not**
 contained by this Docker wall until DSH itself runs inside a scoped worker with
-a broker gateway. Docker's default runtime shares the host kernel.
-Set `CRUCIBLE_RUNTIME=runsc` after installing gVisor if the additional
-user-space-kernel boundary is wanted, then rerun the wall proof.
-Use the current [gVisor installation guide](https://gvisor.dev/docs/user_guide/install/)
-to register `runsc` with Docker; its Debian package is the supported path.
+a broker gateway. Workers use Docker's `runc` runtime by default, which shares
+the host kernel. The optional `runsc-oci` runtime uses gVisor and requires its
+own completed wall proof before making a containment claim.
 
 ## Host setup
 
@@ -31,6 +29,7 @@ to register `runsc` with Docker; its Debian package is the supported path.
    tied to the probe container's IPv4 address at the final kernel DROP rule,
    successful TLS to a pinned allowed host, failed external DNS resolution,
    a denied `ptrace` syscall, host-side Docker configuration inspection,
+   including the requested runtime and the applied custom seccomp profile,
    a probe-specific packet counter, and teardown. A socket timeout or other
    transport error alone is not a verified kernel block. Use
    `sudo journalctl -k --since '5 minutes ago' | grep CRUCIBLE-DROP` for the
@@ -40,6 +39,39 @@ to register `runsc` with Docker; its Debian package is the supported path.
 3. Re-run `setup-net.sh` after Docker or the VM restarts. The firewall rules
    are not persisted by this repository. `create-worker.sh` checks the live
    rules and refuses to start if they are missing or out of order.
+
+### Optional gVisor runtime
+
+On Ubuntu 24.04, after Docker is installed, register a separate `runsc-oci`
+runtime through the [official signed gVisor apt repository](https://gvisor.dev/docs/user_guide/install/):
+
+```bash
+sudo ./infra/install-gvisor.sh
+sudo ./infra/setup-net.sh
+sudo env CRUCIBLE_RUNTIME=runsc-oci ./infra/prove-wall.sh
+```
+
+The installer leaves Docker's default runtime unchanged and registers
+`runsc-oci` with exactly `--oci-seccomp --network=sandbox --platform=systrap`.
+The [gVisor Docker guide](https://gvisor.dev/docs/user_guide/quick_start/docker/)
+documents named runtime registration. Without `--oci-seccomp`, [runsc ignores
+the OCI seccomp profile by default](https://raw.githubusercontent.com/google/gvisor/master/runsc/config/flags.go).
+`create-worker.sh` fails closed unless Docker's effective runtime configuration
+reports those exact flags and an executable root-owned `runsc` binary. The
+wall proof verifies the runtime alias again, matches the applied profile, and
+requires a denied `ptrace` in the worker. Current gVisor source applies the
+[OCI filter to both the initial process and `docker exec`](https://raw.githubusercontent.com/google/gvisor/master/runsc/boot/loader.go).
+
+The custom profile is enforced **inside gVisor's application kernel**, while
+gVisor also applies its own seccomp rules to reduce its host syscall surface.
+gVisor ignores the Docker AppArmor profile. Its
+[Netstack writes packets through the Docker-created veth](https://gvisor.dev/docs/architecture_guide/networking/);
+the live probe must still demonstrate
+that this VM's `DOCKER-USER` rule counted and dropped the direct-IP packet.
+Do not use gVisor host networking for this wall. If the optional proof fails,
+keep using the proven `runc` path and report gVisor as unverified. Run model
+episodes with `sudo env CRUCIBLE_RUNTIME=runsc-oci ...` only after the proof
+passes on that host.
 
 ## Episode lifecycle
 
@@ -106,7 +138,7 @@ outbound content; production deployments should place a strict TLS-aware
 egress proxy in front of shared-IP destinations or use dedicated destination
 IPs. No other containers should be attached to `crucible-net`.
 
-The seccomp file is derived from the [Moby `seccomp/v0.2.1` default allowlist](https://github.com/moby/profiles/blob/seccomp/v0.2.1/seccomp/default.json) (Apache-2.0; license in `LICENSE-moby-profiles.txt`); it additionally removes `ptrace`, process-memory access, and `socketcall`. It keeps `SCMP_ACT_ERRNO` as the default, so privileged syscalls require an explicit allow rule and the dropped capabilities still apply. Docker's default AppArmor profile remains active where AppArmor is available. A seccomp EPERM is not automatically a kernel log entry; the network LOG target supplies the visible containment event.
+The seccomp file is derived from the [Moby `seccomp/v0.2.1` default allowlist](https://github.com/moby/profiles/blob/seccomp/v0.2.1/seccomp/default.json) (Apache-2.0; license in `LICENSE-moby-profiles.txt`); it additionally removes `ptrace`, process-memory access, and `socketcall`. It keeps `SCMP_ACT_ERRNO` as the default, so privileged syscalls require an explicit allow rule and the dropped capabilities still apply. Docker's default AppArmor profile remains active on the `runc` path where AppArmor is available. A seccomp EPERM is not automatically a kernel log entry; the network LOG target supplies the visible containment event.
 
 The wall proof inserts a temporary targetless rule for the probe container's
 source IPv4 and `1.1.1.1:443` immediately before the default DROP. Its counter

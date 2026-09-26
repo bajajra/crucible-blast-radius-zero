@@ -111,6 +111,13 @@ if [[ "$FIRST_FORWARD" != *"-i $BRIDGE"* || "$FIRST_FORWARD" != *"-s $SUBNET"* |
   exit 77
 fi
 
+RUNTIME="${CRUCIBLE_RUNTIME:-runc}"
+case "$RUNTIME" in
+  runc) ;;
+  runsc-oci) python3 "$INFRA_DIR/verify-runtime.py" --quiet >&2 ;;
+  *) echo "CRUCIBLE_RUNTIME must be runc or runsc-oci" >&2; exit 2 ;;
+esac
+
 # Build from the current source for every live session, then pin the exact
 # result. Docker's cache keeps unchanged builds cheap; a stale mutable tag
 # never becomes the worker just because it already exists locally.
@@ -123,12 +130,6 @@ EPISODE_ID="${CRUCIBLE_EPISODE_ID:-$RUN_ID}"
   echo "invalid CRUCIBLE_EPISODE_ID" >&2
   exit 2
 }
-RUNTIME_ARGS=()
-if [[ -n "${CRUCIBLE_RUNTIME:-}" ]]; then
-  [[ "$CRUCIBLE_RUNTIME" =~ ^[a-zA-Z0-9_.-]+$ ]] || exit 2
-  RUNTIME_ARGS=(--runtime "$CRUCIBLE_RUNTIME")
-fi
-
 cleanup() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
 }
@@ -139,7 +140,7 @@ trap 'exit 143' TERM
 CID="$(docker run --detach --rm --name "$NAME" \
   --label crucible.managed=true --label "crucible.episode=$EPISODE_ID" \
   --network "$NET" --dns 127.0.0.1 --dns-opt timeout:1 --dns-opt attempts:1 \
-  "${HOST_ARGS[@]}" "${RUNTIME_ARGS[@]}" \
+  "${HOST_ARGS[@]}" --runtime "$RUNTIME" \
   --read-only \
   --tmpfs /work:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m,uid=10001,gid=10001,mode=1777 \

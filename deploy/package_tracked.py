@@ -35,11 +35,13 @@ INFRA_NAMES = {
     "destroy-worker.sh",
     "exec-worker.sh",
     "extract-scenario.py",
+    "install-gvisor.sh",
     "prove-wall.sh",
     "run-worker.sh",
     "setup-net.sh",
     "stage-scenario.py",
     "wall-probe.py",
+    "verify-runtime.py",
 }
 
 

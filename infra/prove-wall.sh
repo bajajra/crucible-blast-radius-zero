@@ -11,6 +11,11 @@ for binary in docker iptables python3 timeout; do
 done
 INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_FILE="${CRUCIBLE_STATE_DIR:-/var/lib/crucible}/net.json"
+WALL_RUNTIME="${CRUCIBLE_RUNTIME:-runc}"
+[[ "$WALL_RUNTIME" == runc || "$WALL_RUNTIME" == runsc-oci ]] || {
+  echo "UNVERIFIED: CRUCIBLE_RUNTIME must be runc or runsc-oci" >&2
+  exit 77
+}
 
 echo "[1/5] Host virtualization"
 python3 - <<'PY'
@@ -68,14 +73,25 @@ cleanup() {
 trap cleanup EXIT
 CID="$(CRUCIBLE_EPISODE_ID="$PROBE_ID" timeout --signal=TERM --kill-after=5s 180 \
   "$INFRA_DIR/create-worker.sh" "$SCENARIO_DIR")"
-python3 - "$CID" <<'PY'
+python3 - "$CID" "$INFRA_DIR/crucible-seccomp.json" "$WALL_RUNTIME" <<'PY'
 import json
 import re
 import subprocess
 import sys
+from pathlib import Path
 info = json.loads(subprocess.check_output(['docker', 'inspect', sys.argv[1]]))[0]
 host = info['HostConfig']
 security = host['SecurityOpt'] or []
+expected_seccomp = json.loads(Path(sys.argv[2]).read_text())
+expected_runtime = sys.argv[3]
+applied_seccomp = [option.partition('=')[2] for option in security if option.startswith('seccomp=')]
+try:
+    # Docker's CLI sends the compact profile JSON to the daemon, rather than
+    # retaining the source filename in HostConfig.SecurityOpt.
+    seccomp_matches = (len(applied_seccomp) == 1 and
+                       json.loads(applied_seccomp[0]) == expected_seccomp)
+except ValueError:
+    seccomp_matches = False
 checks = {
     'container ID': bool(re.fullmatch(r'[a-f0-9]{64}', info['Id'])),
     'immutable image ID': bool(re.fullmatch(r'sha256:[a-f0-9]{64}', info['Image'])),
@@ -83,7 +99,8 @@ checks = {
     'no host binds': not host['Binds'],
     'non-root worker': info['Config']['User'] == '10001:10001',
     'no capabilities': any(cap.lower() == 'all' for cap in host['CapDrop'] or []),
-    'seccomp profile': any(option.startswith('seccomp=') for option in security),
+    f'{expected_runtime} runtime': host['Runtime'] == expected_runtime,
+    'seccomp profile': seccomp_matches,
     'no new privileges': any(option.startswith('no-new-privileges') for option in security),
     'DNS upstream loopback': host['Dns'] == ['127.0.0.1'],
     'pids limit': host['PidsLimit'] == 64,
@@ -92,10 +109,15 @@ for name, ok in checks.items():
     print(f'{name}: {"OK" if ok else "FAILED"}')
 print('container ID:', info['Id'])
 print('image ID:', info['Image'])
-print('container runtime:', host['Runtime'] or 'Docker default')
+print('container runtime:', host['Runtime'])
 if not all(checks.values()):
     raise SystemExit(1)
 PY
+if [[ "$WALL_RUNTIME" == runsc-oci ]]; then
+  # HostConfig proves which alias Docker used, while Docker info proves the
+  # alias actually maps to runsc with OCI seccomp and sandbox networking.
+  python3 "$INFRA_DIR/verify-runtime.py"
+fi
 CONTAINER_IP="$(python3 - "$CID" "$NET" "$SUBNET" <<'PY'
 import ipaddress
 import json
