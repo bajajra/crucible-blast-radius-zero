@@ -70,8 +70,9 @@ tool calls as isolated by the container wall.
 
 ## Guarded Cloud Compute provisioning
 
-`python3 -m deploy.provision_vm list --region lax` reads the live Vultr
-region, availability, OS, and plan catalogs. The provisioning command is a
+`python3 -m deploy.provision_vm list --region sjc` reads the live Vultr
+region, availability, OS, and plan catalogs, including available VX1 plans.
+The provisioning command is a
 **dry run by default**. It requires a selected region, plan, local `.pub` SSH
 key, public admin IPv4 `/32`, and either maximum planned hours or maximum
 estimated compute spend. For example, after replacing the example values with
@@ -108,7 +109,11 @@ VM to stop hourly charges; a powered-off VM still incurs charges. The
 [Vultr billing guide](https://docs.vultr.com/support/platform/billing/how-am-i-billed-for-my-servers)
 explains the hourly minimum and ongoing billing. The live API response supplies
 the compute rate, while taxes, bandwidth overages, and other separately billed
-resources are outside this estimate. The helper uses the documented
+resources are outside this estimate. The helper accepts a listed VX1
+local-NVMe plan when available in the selected region. VX1 is useful if a
+later experiment needs `/dev/kvm`; the currently attested worker still uses
+Docker `runc` and does not claim a microVM boundary merely because it runs on
+VX1. The helper uses the documented
 [SSH key](https://docs.vultr.com/products/orchestration/ssh-keys/add-ssh-keys),
 [firewall rule](https://docs.vultr.com/products/network/firewall-groups/management/rules),
 and [instance](https://docs.vultr.com/reference/terraform/resources/instance)
@@ -124,10 +129,10 @@ private local `.env.local` through SSH and installs it root-owned at
 remains on the controller. For a live CLI command on the VM, use
 `sudo env CRUCIBLE_ENV_FILE=/etc/crucible/inference.env python3 -m crucible ...`.
 
-## Optional new VX1 provisioning checklist
+## VX1 checks
 
-Provisioning is intentionally manual until you choose a **region** and a
-**maximum spend**. No API key is needed for the deployment scripts above.
+Choose a **region** and a **maximum spend** before provisioning. No API key is
+needed for the deployment scripts above.
 
 - Check VX1 availability in the selected region, select a plan and boot disk,
   and record the hourly rate in the Vultr Console. The [VX1 provisioning
@@ -142,12 +147,12 @@ Provisioning is intentionally manual until you choose a **region** and a
   creation**. Add a [Vultr Firewall Group](https://docs.vultr.com/products/compute/instances/vx1-cloud-compute/networking/enable-firewall)
   permitting SSH only from your trusted address. The dashboard needs no public
   inbound rule. Keep the CRUCIBLE bridge CIDR clear of other Docker/VPC ranges.
-- If creating through the API later, use a separate Vultr **management** API
-  key on the trusted controller, not the inference key and not inside the
-  worker container. The [VX1 API example](https://docs.vultr.com/vultr-vx1-cloud-compute)
-  uses `POST /v2/instances` with region, plan, and OS fields; confirm the live
-  values and expected charge before sending it. Never commit the key or place
-  it in a deployment archive.
+- `deploy/provision_vm.py` uses the Vultr **management** API key on the trusted
+  controller for guarded API deployment. It verifies the chosen VX1 plan in
+  the live regional catalog and estimates compute charge before any write.
+  Keep that key out of the worker container and deployment archive. The
+  [VX1 API examples](https://docs.vultr.com/vultr-vx1-cloud-compute) use
+  `POST /v2/instances` with region, plan, and OS fields.
 
 The installer uses Debian/Ubuntu's `docker.io` package only when Docker is
 absent. Docker's [official Ubuntu installation guide](https://docs.docker.com/engine/install/ubuntu/)

@@ -423,13 +423,31 @@ def list_options(api: VultrManagement, region: str | None) -> None:
         if not isinstance(values, list):
             raise ProvisionError("Vultr returned no regional plan availability")
         available = set(values)
+    all_plans = api.list_all("/plans", "plans")
     print("Small Cloud Compute plans (live catalog prices):")
-    for item in api.list_all("/plans", "plans"):
+    for item in all_plans:
         plan_id = item.get("id", "")
         if plan_id in {"vc2-1c-2gb", "vc2-2c-2gb", "vc2-2c-4gb", "vhp-2c-4gb-amd"}:
             suffix = " available" if available is not None and plan_id in available else " unavailable" if available is not None else ""
             print(f"  {plan_id}: {item.get('vcpu_count')} vCPU, {item.get('ram')} MB, "
                   f"${item.get('hourly_cost')}/hour, ${item.get('monthly_cost')}/month{suffix}")
+    vx1: list[tuple[Decimal, dict[str, Any]]] = []
+    for item in all_plans:
+        if not str(item.get("id", "")).startswith("vx1-") or (
+                available is not None and item.get("id") not in available):
+            continue
+        try:
+            price = _money(item.get("hourly_cost"), "live VX1 hourly price")
+        except ProvisionError:
+            continue
+        vx1.append((price, item))
+    vx1.sort(key=lambda pair: pair[0])
+    print("VX1 plans with nested virtualization (first eight by hourly price):")
+    if not vx1:
+        print("  none available in this region")
+    for _, item in vx1[:8]:
+        print(f"  {item.get('id')}: {item.get('vcpu_count')} vCPU, {item.get('ram')} MB, "
+              f"${item.get('hourly_cost')}/hour, ${item.get('monthly_cost')}/month")
     systems = api.list_all("/os", "os")
     ubuntu = next((item for item in systems if item.get("name") == UBUNTU_NAME), None)
     print(f"OS: {UBUNTU_NAME} (ID {ubuntu.get('id') if ubuntu else 'unavailable'})")
