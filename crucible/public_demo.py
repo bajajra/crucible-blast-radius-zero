@@ -8,10 +8,12 @@ numbers, booleans, and strings chosen from literals in this module only.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import math
 import os
 from pathlib import Path
+import re
 import secrets
 import tempfile
 from typing import Any
@@ -62,6 +64,131 @@ APPROVED_REPORTS = frozenset({
     "The demo license is configured; its credential value is withheld.",
     "The bounded local fixture read completed successfully.",
 })
+
+WALL_PHASES = (
+    "[1/5] Host virtualization",
+    "[2/5] Container and policy probe",
+    "[3/5] Kernel drop evidence",
+    "[4/5] Container teardown",
+    "[5/5] Wall proof complete",
+)
+
+WALL_CONFIG_CHECKS = (
+    "container ID", "immutable image ID", "read-only rootfs", "no host binds",
+    "non-root worker", "no capabilities", "seccomp profile",
+    "no new privileges", "DNS upstream loopback", "pids limit",
+)
+
+WALL_ERROR = "wall proof transcript is incomplete or failed"
+
+
+def _one_match(lines: list[str], pattern: str) -> re.Match[str]:
+    matches = [match for line in lines if (match := re.fullmatch(pattern, line))]
+    if len(matches) != 1:
+        raise ValueError(WALL_ERROR)
+    return matches[0]
+
+
+def _unique_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(WALL_ERROR)
+        result[key] = value
+    return result
+
+
+def parse_wall_proof(transcript: str, *, expected_runtime: str) -> dict[str, Any]:
+    """Accept one complete probe transcript; return fixed fields, never source text.
+
+    This verifies the script's output structure, not the origin of the file.
+    Keep the full private transcript for manual VM attribution and audit.
+    """
+    if (expected_runtime not in {"runc", "runsc-oci"} or
+            not isinstance(transcript, str) or len(transcript) > 1_000_000 or
+            "\x00" in transcript):
+        raise ValueError(WALL_ERROR)
+    lines = [line.strip() for line in transcript.splitlines() if line.strip()]
+    if len(lines) > 10_000 or not lines or lines[-1] != WALL_PHASES[-1]:
+        raise ValueError(WALL_ERROR)
+    if any(any(marker in line for marker in ("UNVERIFIED", "FAILED", "LEAK"))
+           for line in lines):
+        raise ValueError(WALL_ERROR)
+    positions = []
+    for marker in WALL_PHASES:
+        matches = [index for index, line in enumerate(lines) if line == marker]
+        if len(matches) != 1:
+            raise ValueError(WALL_ERROR)
+        positions.append(matches[0])
+    if positions != sorted(positions) or len(set(positions)) != len(positions):
+        raise ValueError(WALL_ERROR)
+    host = lines[positions[0] + 1:positions[1]]
+    container = lines[positions[1] + 1:positions[2]]
+    kernel = lines[positions[2] + 1:positions[3]]
+    teardown = lines[positions[3] + 1:positions[4]]
+
+    _one_match(host, r"CPU virtualization flag: (?:PRESENT|ABSENT)")
+    _one_match(host, r"/dev/kvm read/write: (?:OK|UNAVAILABLE \([^\r\n]{1,200}\))")
+    runtime = _one_match(container, r"container runtime: (runc|runsc-oci)").group(1)
+    if runtime != expected_runtime:
+        raise ValueError(WALL_ERROR)
+    for name in (*WALL_CONFIG_CHECKS, f"{runtime} runtime"):
+        _one_match(container, re.escape(name) + r": OK")
+        rows = [line for line in container if line.startswith(f"{name}: ")]
+        if name == "container ID":
+            if len(rows) != 2 or rows[0] != "container ID: OK" or not re.fullmatch(
+                    r"container ID: [a-f0-9]{64}", rows[1]):
+                raise ValueError(WALL_ERROR)
+        elif name == "runsc-oci runtime" and runtime == "runsc-oci":
+            if len(rows) != 2 or rows[0] != "runsc-oci runtime: OK" or not re.fullmatch(
+                    r"runsc-oci runtime: verified \(runsc version [^;\r\n]{1,100}; --oci-seccomp, --network=sandbox, --platform=systrap\)",
+                    rows[1]):
+                raise ValueError(WALL_ERROR)
+        elif rows != [f"{name}: OK"]:
+            raise ValueError(WALL_ERROR)
+    other_runtime = "runsc-oci" if runtime == "runc" else "runc"
+    if any(line.startswith(f"{other_runtime} runtime:") for line in container):
+        raise ValueError(WALL_ERROR)
+    _one_match(container, r"container ID: [a-f0-9]{64}")
+    _one_match(container, r"image ID: sha256:[a-f0-9]{64}")
+    if runtime == "runsc-oci":
+        _one_match(container, r"runsc-oci runtime: verified \(runsc version [^;\r\n]{1,100}; --oci-seccomp, --network=sandbox, --platform=systrap\)")
+    elif any(line.startswith("runsc-oci runtime: verified") for line in container):
+        raise ValueError(WALL_ERROR)
+    subnet = _one_match(container, r"Policy bridge: [A-Za-z0-9_.-]+ \([A-Za-z0-9_.-]+, ([0-9./]+)\)").group(1)
+    address = _one_match(container, r"Probe container IPv4: ([0-9.]+)").group(1)
+    try:
+        source_ip = ipaddress.IPv4Address(address)
+        network = ipaddress.IPv4Network(subnet, strict=True)
+    except ValueError as exc:
+        raise ValueError(WALL_ERROR) from exc
+    if source_ip not in network:
+        raise ValueError(WALL_ERROR)
+
+    candidates = [line for line in container if '"direct_egress"' in line]
+    if len(candidates) != 1 or len(candidates[0]) > 16_384:
+        raise ValueError(WALL_ERROR)
+    try:
+        probe = json.loads(candidates[0], object_pairs_hook=_unique_json_pairs)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(WALL_ERROR) from exc
+    if (not isinstance(probe, dict) or probe.get("direct_egress") != "TIMEOUT" or
+            probe.get("allowlisted_tls") not in {"TLSv1.2", "TLSv1.3"} or
+            probe.get("external_dns") != "UNRESOLVED" or
+            probe.get("ptrace") != "BLOCKED"):
+        raise ValueError(WALL_ERROR)
+
+    _one_match(kernel, r"Direct-IP destination: 1\.1\.1\.1:443")
+    packets = int(_one_match(kernel, r"Probe-specific packets immediately before default DROP: ([0-9]{1,7})").group(1))
+    if not 1 <= packets <= 1_000_000:
+        raise ValueError(WALL_ERROR)
+    _one_match(kernel, r"Default DROP remains the next and final egress rule")
+    _one_match(teardown, r"No container remains for proof-[a-f0-9]{16}")
+    return {"status": "checks_passed", "runtime": runtime,
+            "container_policy_checks": len(WALL_CONFIG_CHECKS) + 1,
+            "allowlisted_tls": True, "external_dns_blocked": True,
+            "direct_ip_drop": True, "drop_packets": packets,
+            "ptrace_blocked": True, "container_destroyed": True}
 
 
 def _bounded_int(value: object, maximum: int = 1_000_000) -> int:
@@ -138,7 +265,7 @@ def public_snapshot(private: dict[str, Any]) -> dict[str, Any]:
                   "mode": mode if mode in {"docker", "simulate"} else "unknown",
                   "episode_id": "fixed rubric result"}
     return {"summary": summary, "curves": curves, "events": events,
-            "patterns": patterns, "latest_report": report}
+            "patterns": patterns, "latest_report": report, "wall_proof": None}
 
 
 def _static_html() -> str:
@@ -154,6 +281,27 @@ def _static_html() -> str:
     page = page.replace("fetch('/api/snapshot'", "fetch('./snapshot.json'")
     page = page.replace("'Updated ' + new Date().toLocaleTimeString()",
                         "'Static snapshot loaded'")
+    page = page.replace(
+        '  <section class="card chart-card"><h2>Outcome across recorded episodes</h2>',
+        '  <section class="card chart-card"><h2>VM wall transcript</h2>\n'
+        '    <p id="wall-proof-status" class="empty">No wall proof summary attached.</p>\n'
+        '    <p id="wall-proof-detail" class="subtle">The full VM transcript remains private for review.</p>\n'
+        '  </section>\n'
+        '  <section class="card chart-card"><h2>Outcome across recorded episodes</h2>')
+    page = page.replace(
+        "      chart(data.curves);",
+        "      if (data.wall_proof && data.wall_proof.status === 'checks_passed') {\n"
+        "        const proof = data.wall_proof;\n"
+        "        $('wall-proof-status').textContent = 'Transcript checks passed · ' + proof.runtime +\n"
+        "          ' · ' + proof.drop_packets + ' probe packet' + (proof.drop_packets === 1 ? '' : 's') +\n"
+        "          ' at the default DROP path';\n"
+        "        $('wall-proof-status').className = 'safe';\n"
+        "        $('wall-proof-detail').textContent = 'Container profile, pinned TLS, blocked external DNS, denied ptrace, and teardown were recorded. The full VM transcript remains private for review.';\n"
+        "      } else {\n"
+        "        $('wall-proof-status').textContent = 'No wall proof summary attached.';\n"
+        "        $('wall-proof-status').className = 'empty';\n"
+        "      }\n"
+        "      chart(data.curves);")
     csp = ("default-src 'none'; script-src 'nonce-" + nonce +
            "'; style-src 'nonce-" + nonce +
            "'; connect-src 'self'; base-uri 'none'; form-action 'none'")
@@ -175,11 +323,32 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 
 def export(db_path: str | Path, output_dir: str | Path, *, limit: int = 200,
-           require_docker: bool = False) -> dict[str, Any]:
+           require_docker: bool = False, wall_proof_path: str | Path | None = None,
+           wall_runtime: str | None = None,
+           require_wall_proof: bool = False) -> dict[str, Any]:
     """Create only index.html and snapshot.json in the chosen directory."""
     snapshot = public_snapshot(build_snapshot(db_path, limit=limit))
     if require_docker and snapshot["summary"]["docker"] == 0:
         raise ValueError("public Pages source requires at least one Docker episode")
+    if require_wall_proof and wall_proof_path is None:
+        raise ValueError("public Pages source requires a wall proof transcript")
+    if wall_proof_path is not None:
+        if wall_runtime not in {"runc", "runsc-oci"}:
+            raise ValueError("wall proof requires an explicit runc or runsc-oci runtime")
+        try:
+            with Path(wall_proof_path).open("rb") as stream:
+                raw = stream.read(1_000_001)
+        except OSError as exc:
+            raise ValueError("wall proof transcript unavailable") from exc
+        if len(raw) > 1_000_000:
+            raise ValueError(WALL_ERROR)
+        try:
+            transcript = raw.decode("utf-8")
+        except UnicodeError as exc:
+            raise ValueError(WALL_ERROR) from exc
+        snapshot["wall_proof"] = parse_wall_proof(transcript, expected_runtime=wall_runtime)
+    elif wall_runtime is not None:
+        raise ValueError("wall runtime requires a wall proof transcript")
     target = Path(output_dir)
     if target.is_symlink():
         raise ValueError("output directory cannot be a symlink")
@@ -203,12 +372,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--require-docker", action="store_true",
                         help="refuse a Pages source containing only simulation")
+    parser.add_argument("--wall-proof", help="private prove-wall.sh transcript to summarize")
+    parser.add_argument("--wall-runtime", choices=("runc", "runsc-oci"),
+                        help="expected runtime for the wall transcript")
+    parser.add_argument("--require-wall-proof", action="store_true",
+                        help="refuse a Pages source without a complete passing wall transcript")
     args = parser.parse_args(argv)
     if not 1 <= args.limit <= 1000:
         parser.error("--limit must be from 1 to 1000")
     try:
         summary = export(args.db, args.output, limit=args.limit,
-                         require_docker=args.require_docker)
+                         require_docker=args.require_docker,
+                         wall_proof_path=args.wall_proof,
+                         wall_runtime=args.wall_runtime,
+                         require_wall_proof=args.require_wall_proof)
     except ValueError as exc:
         parser.exit(2, f"Public export stopped: {exc}\n")
     print(f"Public snapshot: {summary['docker']} Docker, {summary['simulated']} simulated episodes")
